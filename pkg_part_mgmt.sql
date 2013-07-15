@@ -125,7 +125,7 @@ AS
   PROCEDURE execute(in_sql VARCHAR2);
 
   c_date_format CONSTANT VARCHAR2(8) := 'YYYYMMDD';
-  c_datafile_path CONSTANT VARCHAR2(64) := '/oradata/u03/DWSTDEV1/data_files/data/';
+  c_datafile_path CONSTANT VARCHAR2(64) := '/path/to/data/files/';
   c_regexp_pattern CONSTANT VARCHAR2 (64) := '^(D|X)([A-Z]+_)([A-Z]+)(_P){0,1}([0-9]+)$';
 
   partition_not_found EXCEPTION;
