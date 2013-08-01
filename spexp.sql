@@ -1,6 +1,6 @@
 ------------------------------------------------------------------------------------
 -- File name  : spexp.sql
--- Version    : v1.0.8 beta 22-Apr-2013
+-- Version    : v1.0.12 beta 03-Jun-2013
 -- Purpose    : The simple data export tool
 -- Author     : Valentin Nikotin (rednikotin@gmail.com)
 -- Copyright  : (c) Valentin Nikotin - valentinnikotin.com. All rights reserved.
@@ -45,17 +45,21 @@
 --      -os                          : OS type : win or unix (default)
 --      -estimate, -est              : export nothing, just estimate rows, time and export file size (only for unix)
 --      -convert_characterset, -cc   : added convertation from both source database charactersets to destination database chararactersets
---      -use_gzip                    : spool data to fifo and gzip it, doesn't work with estimation or for WIN
+--      -use_gzip, -gz               : spool data to fifo and gzip it, doesn't work with estimation or for WIN
+--      -from_query_qvar, -qvar      : use it to pass long query by variable qvar instead of by parameter from_query
 --
---   short : (ash|hist_ash)[N(d|h|m|s)][(d|t|f)]
+--   short : ((ash|hist_ash)[N(d|h|m|s)][(d|t|f)])|(sql[Nx][(d|t|f)])
 --      ses - gv$session
 --      ash - alias for gv$active_session_history
 --      hash - alias for dba_hist_active_sess_history
+--      sql - gv$sql
 --      N(d|h|m|s) - optionaly number of days, hours, minutes or seconds that will be used in the where filter
---      d|t|f - predefined name formats for export table name, <alias>_<formatted date>, where formatted date:
+--      d|t|f - predefined name formats for export table name and export filr name, <alias>_<formatted date>, where formatted date:
 --      d - YYYYMMDD
 --      t - HH24MISS
 --      f - YYYYMMDDHH24MISS
+--      x - <DBNAME>_YYMMDD_HH24MI
+--      Nx - extra-large clob support, where 1000*N is max clob lenght 
 --
 -- Note:
 --    CLOB, NCLOB dataypes are shrinked to max_clob_length (10000 default) characters
@@ -108,6 +112,7 @@ col echo new_value _echo
 col tmpfifo new_value _tmpfifo
 col use_gzip new_value _use_gzip
 col spoolto new_value _spoolto
+col ver new_value _ver
 
 col a newline for a2498
 
@@ -121,6 +126,7 @@ var t_end varchar2(30)
 var f_size number
 var from_nls_characterset varchar2(30)
 var from_nls_nchar_characterset varchar2(30)
+var qvar_copy varchar2(4000)
 
 -- documented
 var from_table varchar2(100)
@@ -187,6 +193,10 @@ select sys_connect_by_path('ol '||level||' new_val '||level||chr(10),'c') a,
 from dual where level=&_max_parameters_count connect by level<=&_max_parameters_count;
 spool off
 @&_tmpfile1
+
+select substr(value, 1, instr(value, '.') - 1) ver from v$parameter where name = 'compatible';
+
+exec :qvar_copy := :qvar
 
 set termout on
 declare
@@ -384,6 +394,7 @@ begin
         when l_parameter in ('-d2')                          then :debug_level := 2;
         when l_parameter in ('-d3')                          then :debug_level := 3;
         when l_parameter in ('-use_gzip', '-gz')             then :use_gzip := 1;
+        when l_parameter in ('-from_query_qvar', '-qvar')    then :from_query := :qvar_copy;
         when l_parameter is null then
           null;
         else l_must_get_value := true;
@@ -416,6 +427,7 @@ begin
       return case i_modifier when 'd' then 'day' when 'h' then 'hour' when 'm' then 'minute' when 's' then 'second' end;
     end;  
     procedure set_to_table_by_modifier (i_short varchar2, i_modifier varchar2) is
+      l_dbname varchar2(11);
     begin
       case i_modifier 
         when 't' then 
@@ -424,10 +436,15 @@ begin
           :to_table := i_short || to_char(sysdate, '_YYYYMMDD');
         when 'f' then
           :to_table := i_short || to_char(sysdate, '_YYYYMMDDHH24MISS');
+        when 'x' then
+          select '_' || substr(name, 1, 10) into l_dbname from v$database;
+          :to_table := i_short || l_dbname || to_char(sysdate, '_YYMMDD_HH24MI');
         else
           err('unknown modifier ['||i_modifier||'], only t,d or f are supported');
       end case;
       pdebug(2, 'set to_table using modifier from short expr to ['||:to_table||']');
+      :export_file_name := :to_table || '.sql';      
+      pdebug(2, 'set export_file_name using modifier from short expr to ['||:export_file_name||']');
     end;
     procedure set_parameters_by_short (i_short varchar2) is
       l_numeric varchar2(10);
@@ -447,7 +464,7 @@ begin
           pdebug(2, 'no where_clause by short expr, set to null');
           l_modifier1 := substr(:short, -1);
           set_to_table_by_modifier(i_short, l_modifier1);
-        when i_short in ('ash', 'hash') then
+        when i_short in ('ash', 'hash', 'sql') then
           l_modifier1 := substr(:short, -1);
           l_modifier2 := substr(:short, -2, 1);
           if instr('0123456789', l_modifier2) = 0 then
@@ -457,14 +474,27 @@ begin
           else 
             l_numeric := substr(:short, l_start, l_len - l_start);
           end if;
-          :where_clause := 'sample_time>systimestamp-numtodsinterval('||l_numeric||','''||modifier_to_time(l_modifier1)||''')';
-          pdebug(2, 'set where_clause to ['||:where_clause||'] by short expr');
+          if i_short = 'sql' then
+            if l_modifier1 = 'x' then
+              :max_clob_size := 1000*l_numeric;
+              :sp_arraysize := 1;
+              pdebug(2, 'set max_clob_size to ['||:max_clob_size||'] by short expr');
+              pdebug(2, 'set sp_arraysize to ['||:sp_arraysize||'] by short expr');
+            else  
+              err('unknown modifier ['||l_modifier1||'], only x is supported');
+            end if;
+          else 
+            :where_clause := 'sample_time>systimestamp-numtodsinterval('||l_numeric||','''||modifier_to_time(l_modifier1)||''')';
+            pdebug(2, 'set where_clause to ['||:where_clause||'] by short expr');
+          end if;
         else
           null;
       end case;
     end;
   begin
-    if    :short = 'ses' then
+    if    :short is null then
+      null;
+    elsif :short = 'ses' then
       :from_table := 'gv$session';
       pdebug(2, 'set from_table to ['||:from_table||'] by short');
     elsif :short like 'ash%' then
@@ -475,6 +505,12 @@ begin
       :from_table := 'dba_hist_active_sess_history';
       pdebug(2, 'set from_table to ['||:from_table||'] by short');
       set_parameters_by_short('hash');
+    elsif :short like 'sql%' then
+      :from_table := 'gv$sql';
+      pdebug(2, 'set from_table to ['||:from_table||'] by short');
+      set_parameters_by_short('sql');
+    else
+      err('Unknown short allias ['||:short||']');
     end if;
   end;
   
@@ -575,7 +611,10 @@ begin
     pdebug(2, 'set method_char to '||:method_char||' as no_temp=1');
   end if;
   
-  if :no_auto_clob_stmt = 0 and :no_clob_stmt = 0 and :no_temp = 0 then
+  if &_ver < 11 then
+    :no_clob_stmt := 1;
+    pdebug(2, 'set no_clob_stmt to 1 by version '||&_ver);
+  elsif :no_auto_clob_stmt = 0 and :no_clob_stmt = 0 and :no_temp = 0 then
     declare
       l_clob clob;
       l_cur sys_refcursor;
@@ -634,7 +673,9 @@ begin
   
   if :from_query is null and :from_table is null then
     :from_table := 'dual';
+    :export_file_name := 'test_spexp_dual.sql';
     pdebug(2, 'set from_table to [dual] as default');
+    pdebug(2, 'set from_table to [test_spexp_dual.sql] as default');
   end if;  
   
   if :from_table is not null then
@@ -1229,7 +1270,7 @@ select 'Start spooling file &_spoolto' from dual where :estimate = 0;
 
 set termout off
 set define %
-host %_use_gzip mkfifo %_tmpfifo ; gzip -9 -c < %_tmpfifo > %_expfile &
+host %_nowin %_use_gzip mkfifo %_tmpfifo ; gzip -9 -c < %_tmpfifo > %_expfile &
 set define &
 exec :t_start := to_char(systimestamp, 'YYYYMMDDHH24MISSFF')
 spool &_spoolto
@@ -1263,7 +1304,7 @@ prompt whenever sqlerror continue
 prompt set termout on
 spool off
 exec :t_end := to_char(systimestamp, 'YYYYMMDDHH24MISSFF')
-host &_use_gzip rm &_tmpfifo
+host &_nowin &_use_gzip rm &_tmpfifo
 
 spool &_tmpfile2
 prompt exec :f_size := null
@@ -1310,9 +1351,10 @@ col tmpfifo clear
 col use_gzip clear
 col spoolto clear
 col a clear
+col ver clear
 start plusenv.tmp.sql
 host &_nowin rm &_tmpfile1 &_tmpfile2 plusenv.tmp.sql
 host &_nounix del &_tmpfile1 &_tmpfile2 plusenv.tmp.sql
-undefine &_all_params _all_params _max_parameters_count _tmpfile1 _tmpfile2 _tblname _expfile _debug1 _debug2 _debug3 _tstr _dbmssql _dbmslob _nounix _nowin _sp_arraysize _sp_long _echo _tmpfifo _use_gzip _spoolto
+undefine &_all_params _all_params _max_parameters_count _tmpfile1 _tmpfile2 _tblname _expfile _debug1 _debug2 _debug3 _tstr _dbmssql _dbmslob _nounix _nowin _sp_arraysize _sp_long _echo _tmpfifo _use_gzip _spoolto _ver
 whenever sqlerror continue
 set termout on
