@@ -9,6 +9,8 @@
 
 import sys
 import time
+import csv
+import cx_Oracle
 
 def usage():
   print '''Tool for exporting data in CSV from Oracle Database.
@@ -28,8 +30,6 @@ def main():
   print 'Elapsed %d seconds' % round(time.time() - start_time)
 
 def export(connection_string, query_filename, output_filename):
-  import csv
-  import cx_Oracle
 
   db = cx_Oracle.connect(connection_string)
   cursor = db.cursor()
