@@ -1,4 +1,4 @@
 freezing-octo-bear
 ==================
 
-Some SQL and PL/SQL scripts
+Various SQL, PL/SQL scripts as well as Python scripts related to Oracle Database
